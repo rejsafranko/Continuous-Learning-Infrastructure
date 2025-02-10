@@ -1,1 +1,1 @@
-# AI-Cloud-Infrastructure
+# AWS Model Re-training Infrastructure
