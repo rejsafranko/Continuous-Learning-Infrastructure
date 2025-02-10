@@ -1,0 +1,7 @@
+env
+
+airflow/.env
+
+storage/.env
+storage/data/*
+!storage/data/.gitkeep

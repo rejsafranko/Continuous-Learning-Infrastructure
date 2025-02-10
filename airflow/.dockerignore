@@ -1,0 +1,4 @@
+build.sh
+deploy.sh
+dev.sh
+.env
