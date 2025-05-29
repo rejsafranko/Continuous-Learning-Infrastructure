@@ -1,4 +1,6 @@
-# Continuous Learning Infrastructure
+# ❗Work in Progress❗
+
+## Continuous Learning Infrastructure
 This project automates the process of detecting category drift in image labels, triggering retraining on AWS infrastructure. It integrates with AWS S3 for data storage, SNS for notifications, and EC2 for executing the retraining process.
 
 <div align="center">
