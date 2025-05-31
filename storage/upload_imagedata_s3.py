@@ -4,101 +4,95 @@ import logging
 import os
 
 import boto3
-import dotenv
-import tqdm
+from botocore.exceptions import ClientError
+from tqdm import tqdm
+
+# ------------------ Config ------------------
 
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
 )
 
-dotenv.load_dotenv()
+IMG_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".npy")
+DEFAULT_REGION = "eu-central-1"
 
-AWS_SECRET_KEY = os.getenv("AWS_SECRET_KEY")
-AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY")
-AWS_REGION = os.getenv("AWS_REGION", "eu-central-1")
-
-
-def validate_env_vars() -> None:
-    """Ensure all necessary environment variables are set."""
-    required_vars = {
-        "AWS_SECRET_KEY": AWS_SECRET_KEY,
-        "AWS_ACCESS_KEY": AWS_ACCESS_KEY,
-    }
-
-    missing_vars = [var for var, value in required_vars.items() if not value]
-    if missing_vars:
-        raise ValueError(f"Missing environment variables: {', '.join(missing_vars)}")
-
+# ------------------ Utilities ------------------
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset_dir", type=str, required=True)
-    parser.add_argument("--bucket_name", type=str, required=True)
+    parser = argparse.ArgumentParser(description="Upload image dataset to S3.")
+    parser.add_argument("--dataset_dir", type=str, required=True, help="Path to dataset directory.")
+    parser.add_argument("--bucket_name", type=str, required=True, help="S3 bucket name.")
+    parser.add_argument("--s3_prefix", type=str, default="", help="Prefix path in the S3 bucket.")
     return parser.parse_args()
 
 
-def upload_image(s3_client, bucket_name: str, file_path: str, file_name: str) -> None:
-    try:
-        s3_client.upload_file(file_path, bucket_name, file_name)
-    except Exception as e:
-        print(f"Failed to upload {file_name}: {e}")
-
-
-def upload_images_to_s3(bucket_name: str, directory_path: str) -> None:
-    s3_client = boto3.client(
-        "s3",
-        aws_access_key_id=AWS_ACCESS_KEY,
-        aws_secret_access_key=AWS_SECRET_KEY,
-        region_name=AWS_REGION,
-    )
-
+def ensure_bucket_exists(s3_client, bucket_name: str, region: str) -> None:
     try:
         s3_client.head_bucket(Bucket=bucket_name)
-    except Exception as e:
-        s3_client.create_bucket(Bucket=bucket_name)
-        logging.info(f"Bucket '{bucket_name}' created.")
-
-    file_paths = [
-        (os.path.join(root, file_name), file_name)
-        for root, _, files in os.walk(directory_path)
-        for file_name in files
-        if file_name.lower().endswith(
-            (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".npy")
-        )
-    ]
-
-    num_cpu_cores = os.cpu_count()
-
-    try:
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=2 * num_cpu_cores if num_cpu_cores else 8
-        ) as executor:
-            list(
-                tqdm.tqdm(
-                    executor.map(
-                        lambda file: upload_image(
-                            s3_client=s3_client,
-                            bucket_name=bucket_name,
-                            file_name=file[1],
-                            file_path=file[0],
-                        ),
-                        file_paths,
-                    ),
-                    total=len(file_paths),
-                )
+        logging.info(f"Bucket '{bucket_name}' exists.")
+    except ClientError as e:
+        error_code = int(e.response["Error"]["Code"])
+        if error_code == 404:
+            s3_client.create_bucket(
+                Bucket=bucket_name,
+                CreateBucketConfiguration={"LocationConstraint": region}
             )
-    except MemoryError:
-        print("Memory limit exceeded. Consider reducing max_workers.")
+            logging.info(f"Bucket '{bucket_name}' created in {region}.")
+        else:
+            raise e
+
+
+def gather_image_files(dataset_dir: str, s3_prefix: str) -> list[tuple[str, str]]:
+    file_pairs = []
+    for root, _, files in os.walk(dataset_dir):
+        for file in files:
+            if file.lower().endswith(IMG_EXTENSIONS):
+                local_path = os.path.join(root, file)
+                relative_path = os.path.relpath(local_path, start=dataset_dir)
+                s3_key = os.path.join(s3_prefix, relative_path).replace("\\", "/")
+                file_pairs.append((local_path, s3_key))
+    return file_pairs
+
+
+def upload_image(s3_client, bucket_name: str, file_path: str, s3_key: str) -> None:
+    try:
+        s3_client.upload_file(file_path, bucket_name, s3_key)
+        logging.info(f"Uploaded: {s3_key}")
     except Exception as e:
-        print(f"An error occurred: {e}")
+        logging.error(f"Failed to upload {s3_key}: {e}", exc_info=True)
 
 
-def main(args: argparse.Namespace) -> None:
-    dataset_dir: str = args.dataset_dir
-    bucket_name: str = args.bucket_name
-    upload_images_to_s3(bucket_name=bucket_name, directory_path=dataset_dir)
+def upload_images_to_s3(bucket_name: str, directory_path: str, s3_prefix: str, region: str) -> None:
+    s3_client = boto3.client("s3", region_name=region)
+
+    ensure_bucket_exists(s3_client, bucket_name, region)
+
+    file_pairs = gather_image_files(directory_path, s3_prefix)
+    logging.info(f"Discovered {len(file_pairs)} files to upload.")
+
+    max_workers = min(32, (os.cpu_count() or 1) * 2)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        list(tqdm(
+            executor.map(
+                lambda pair: upload_image(s3_client, bucket_name, *pair),
+                file_pairs
+            ),
+            total=len(file_pairs),
+            desc="Uploading images"
+        ))
+
+
+def main() -> None:
+    args = parse_args()
+    upload_images_to_s3(
+        bucket_name=args.bucket_name,
+        directory_path=args.dataset_dir,
+        s3_prefix=args.s3_prefix,
+        region=DEFAULT_REGION
+    )
 
 
 if __name__ == "__main__":
-    args = parse_args()
-    main(args)
+    main()
