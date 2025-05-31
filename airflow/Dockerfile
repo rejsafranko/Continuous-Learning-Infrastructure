@@ -8,7 +8,7 @@ COPY . /opt/airflow
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY scripts/init_airflow.sh /opt/airflow/scripts/init_airflow.sh
+COPY ./init_airflow.sh /opt/airflow/scripts/init_airflow.sh
 RUN chmod +x /opt/airflow/scripts/init_airflow.sh
 
 RUN chown -R airflow: /opt/airflow
